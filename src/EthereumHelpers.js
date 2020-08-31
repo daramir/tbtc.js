@@ -1,7 +1,8 @@
 /** @typedef { import("web3").default } Web3 */
-/** @typedef { import("web3-eth-contract").Contract } Contract */
-/** @typedef { import("web3-eth-contract").ContractSendMethod } ContractSendMethod */
-/** @typedef { import("web3-eth-contract").SendOptions } SendOptions */
+/** @typedef { import("../node_modules/web3/node_modules/web3-eth-contract").Contract } Contract */
+/** @typedef { import("../node_modules/web3/node_modules/web3-eth-contract").Filter } Filter */
+/** @typedef { import("../node_modules/web3/node_modules/web3-eth-contract").ContractSendMethod } ContractSendMethod */
+/** @typedef { import("../node_modules/web3/node_modules/web3-eth-contract").SendOptions } SendOptions */
 /** @typedef { import("web3-utils").AbiItem } AbiItem */
 /** @typedef { import("web3-core").TransactionReceipt } TransactionReceipt */
 
@@ -84,7 +85,7 @@ function readEventFromTransaction(
  *
  * @param {Contract} sourceContract The web3 Contract that emits the event.
  * @param {string} eventName The name of the event to wait on.
- * @param {object} [filter] An additional filter to apply to the event being
+ * @param {Filter} [filter] An additional filter to apply to the event being
  *        searched for.
  *
  * @return {Promise<any>} A promise that will be fulfilled by the event
@@ -119,6 +120,30 @@ function getEvent(sourceContract, eventName, filter) {
 }
 
 /**
+ * Looks up all existing events named `eventName` on `sourceContract`, searching
+ * past blocks and then returning them. Respects additional filtering rules set
+ * in the passed `filter` object, if available. Does not wait for any new
+ * events.
+ *
+ * @param {Contract} sourceContract The web3 Contract that emits the event.
+ * @param {string} eventName The name of the event to wait on.
+ * @param {Filter} [filter] An additional filter to apply to the event being
+ *        searched for.
+ *
+ * @return {Promise<any[]>} A promise that will be fulfilled by the list of
+ *         event objects once they are found.
+ */
+async function getExistingEvents(sourceContract, eventName, filter) {
+  const events = await sourceContract.getPastEvents(eventName, {
+    fromBlock: 0,
+    toBlock: "latest",
+    filter
+  })
+
+  return events
+}
+
+/**
  * Looks up an existing event named `eventName` on `sourceContract`, searching
  * past blocks for it and then returning it. Respects additional filtering rules
  * set in the passed `filter` object, if available. Does not wait for any new
@@ -126,20 +151,14 @@ function getEvent(sourceContract, eventName, filter) {
  *
  * @param {Contract} sourceContract The web3 Contract that emits the event.
  * @param {string} eventName The name of the event to wait on.
- * @param {object} [filter] An additional filter to apply to the event being
+ * @param {Filter} [filter] An additional filter to apply to the event being
  *        searched for.
  *
  * @return {Promise<any>} A promise that will be fulfilled by the event object
  *         once it is found.
  */
 async function getExistingEvent(sourceContract, eventName, filter) {
-  const events = await sourceContract.getPastEvents(eventName, {
-    fromBlock: 0,
-    toBlock: "latest",
-    filter
-  })
-
-  return events[0]
+  return (await getExistingEvents(sourceContract, eventName, filter))[0]
 }
 
 /**
@@ -196,7 +215,6 @@ async function sendSafely(boundContractMethod, sendParams, forceSend) {
       // If we're not force-sending, use `call` to throw the true error reason
       // (`estimateGas` doesn't return error messages, it only throws an
       // out-of-gas).
-      // @ts-ignore A newer version of Web3 is needed to include call in TS.
       await boundContractMethod.call({
         from: "",
         ...sendParams
@@ -310,6 +328,7 @@ function getDeployedContract(artifact, web3, networkId) {
 export default {
   isMainnet,
   getEvent,
+  getExistingEvents,
   getExistingEvent,
   readEventFromTransaction,
   bytesToRaw,

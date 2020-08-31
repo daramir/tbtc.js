@@ -2,7 +2,14 @@
 import Subproviders from "@0x/subproviders"
 import Web3 from "web3"
 import ProviderEngine from "web3-provider-engine"
+import WebsocketSubprovider from "web3-provider-engine/subproviders/websocket.js"
 import TBTC from "../index.js"
+import { parseDepositCommand } from "./commands/deposit.js"
+import {
+  findAndConsumeArgsExistence,
+  findAndConsumeArgsValues
+} from "./helpers.js"
+import AvailableConfigs from "./config.json"
 /** @typedef {import('../src/TBTC.js').ElectrumConfig} ElectrumConfig */
 /** @typedef {import('../src/TBTC.js').TBTC} TBTCInstance */
 /** @typedef {import('../src/Deposit.js').default} Deposit */
@@ -17,41 +24,41 @@ import TBTC from "../index.js"
  * @return {Promise<string>} The output of the command.
  */
 
-/** @type {{ [name: string]: ElectrumConfig }} */
-const electrumConfigs = {
-  testnet: {
-    server: "electrumx-server.test.tbtc.network",
-    port: 8443,
-    protocol: "wss"
-  },
-  testnetTCP: {
-    server: "electrumx-server.test.tbtc.network",
-    port: 50002,
-    protocol: "ssl"
-  },
-  mainnet: {
-    server: "electrumx-server.tbtc.network",
-    port: 8443,
-    protocol: "wss"
-  },
-  mainnetTCP: {
-    server: "electrumx-server.tbtc.network",
-    port: 50002,
-    protocol: "ssl"
-  }
+// --------------------------------- ARGS --------------------------------------
+let args = process.argv.slice(2)
+if (process.argv[0].includes("tbtc.js")) {
+  args = process.argv.slice(1) // invoked directly, no node
 }
 
+// No debugging unless explicitly enabled.
+const {
+  found: { debug },
+  remaining: flagArgs
+} = findAndConsumeArgsExistence(args, "--debug")
+if (!debug) {
+  console.debug = () => {}
+}
+
+const {
+  found: { mnemonic, account, rpc },
+  remaining: commandArgs
+} = findAndConsumeArgsValues(flagArgs, "--mnemonic", "--account", "--rpc")
 const engine = new ProviderEngine({ pollingInterval: 1000 })
+
 engine.addProvider(
   // For address 0x420ae5d973e58bc39822d9457bf8a02f127ed473.
   new Subproviders.PrivateKeyWalletSubprovider(
-    "b6252e08d7a11ab15a4181774fdd58689b9892fe9fb07ab4f026df9791966990"
+    mnemonic ||
+      "b6252e08d7a11ab15a4181774fdd58689b9892fe9fb07ab4f026df9791966990"
   )
 )
 engine.addProvider(
-  new Subproviders.RPCSubprovider(
-    "https://:e18ef5ef295944928dd87411bc678f19@ropsten.infura.io/v3/59fb36a36fa4474b890c13dd30038be5"
-  )
+  new WebsocketSubprovider({
+    rpcUrl:
+      rpc || "wss://ropsten.infura.io/ws/v3/414a548bc7434bbfb7a135b694b15aa4",
+    debug,
+    origin: undefined
+  })
 )
 
 // -------------------------------- SETUP --------------------------------------
@@ -60,48 +67,39 @@ engine.addProvider(
 const web3 = new Web3(engine)
 engine.start()
 
-// --------------------------------- ARGS --------------------------------------
-let args = process.argv.slice(2)
-if (process.argv[0].includes("tbtc.js")) {
-  args = process.argv.slice(1) // invoked directly, no node
-}
-
 /** @type {CommandAction | null} */
 let action = null
 
-switch (args[0]) {
+switch (commandArgs[0]) {
   case "deposit":
-    {
-      let mint = true
-      if (args.length == 3 && args[2] == "--no-mint") {
-        mint = false
-        args.pop() // drop --no-mint
-      }
-      if (args.length == 2 && bnOrNull(args[1])) {
-        action = async tbtc => {
-          return await createDeposit(tbtc, web3.utils.toBN(args[1]), mint)
-        }
-      }
-    }
+    action = parseDepositCommand(web3, args.slice(1))
     break
-  case "resume":
-    {
-      let mint = true
-      if (args.length == 3 && args[2] == "--no-mint") {
-        mint = false
-        args.pop() // drop --no-mint
-      }
-      if (args.length == 2 && web3.utils.isAddress(args[1])) {
-        action = async tbtc => {
-          return await resumeDeposit(tbtc, args[1], mint)
-        }
-      }
-    }
-    break
-  case "redeem":
-    if (args.length == 3 && web3.utils.isAddress(args[1])) {
+  case "lot-sizes":
+    if (args.length == 1) {
       action = async tbtc => {
-        return await redeemDeposit(tbtc, args[1], args[2])
+        return (await tbtc.Deposit.availableSatoshiLotSizes())
+          .map(_ => _.toString())
+          .join("\n")
+      }
+    }
+    break
+  case "supply":
+    if (args.length == 1) {
+      action = async tbtc => {
+        return await tbtc.depositFactory
+          .vendingMachine()
+          .methods.getMintedSupply()
+          .call()
+      }
+    }
+    break
+  case "supply-cap":
+    if (args.length == 1) {
+      action = async tbtc => {
+        return await tbtc.depositFactory
+          .vendingMachine()
+          .methods.getMaxSupply()
+          .call()
       }
     }
     break
@@ -109,25 +107,119 @@ switch (args[0]) {
 
 if (action === null) {
   console.log(`
-Unknown command ${args[0]} or bad parameters. Supported commands:
-    deposit <lot-size-satoshis> [--no-mint]
+Unknown command ${args[0]} or bad parameters.
+
+Supported flags:
+    --debug
+        Enable debug output.
+
+    --rpc <rpc-url>
+        Set RPC URL to the specified value.
+
+    --mnemonic <mnemonic>
+        Use the specified for the operating account. Also supports private key
+        strings, since the underlying provider accepts these.
+
+    --account <account>
+        Use the specified account for all transactions. If --mnemonic is
+        specified, it must be able to sign for this account in order for
+        mutating transactions to be sent to the Ethereum chain. If this is
+        left off, the first account for the private key is used.
+
+Supported commands:
+    deposit new [--no-mint] <lot-size-satoshis>
         Initiates a deposit funding flow. Takes the lot size in satoshis.
         Will prompt with a Bitcoin address when funding needs to be
-        submitted.
+        submitted. When the flow completes, outputs the deposit as a single
+        tab-delimited line with the deposit address, current deposit state,
+        the deposit lot size in satoshis, and, when applicable, the minted
+        amount of TBTC.
 
         --no-mint
-            specifies not to mint TBTC once the deposit is qualified.
+            Specifies not to mint TBTC once the deposit is qualified.
 
-    resume <deposit-address> [--no-mint]
-        Resumes a deposit funding flow that did not complete. An existing
-        funding transaction can exist, but this can also be run before the
-        funding transaction is submitted.
+    deposit list [--vending-machine] [--address <address>]
+        With no options, lists the deposits currently owned by the web3
+        account address. Deposits are output as tab-delimited lines that
+        include the deposit address, current deposit state, and deposit
+        lot size in satoshis.
 
-        --no-mint
-            specifies not to mint TBTC once the deposit is qualified.
+        --vending-machine
+            Lists the deposits currently owned by the vending machine.
 
-    redeem <deposit-address>
-        Attempts to redeem a tBTC deposit.
+        --address <address>
+            Lists the deposits currently owned by the specified address.
+
+    deposit <address> [<resume|redeem|liquidate|withdraw>]
+        Operations on a particular address. If no command is provided,
+        outputs the deposit as a single tab-delimited line with the deposit
+        address, current deposit state, and deposit lot size in satoshis.
+
+        resume [--funding|--redemption] [--no-mint]
+            Resumes a funding or redemption flow, depending on the deposit's
+            current state. When the flow completes, outputs the deposit as a
+            single tab-delimited line with the deposit address, current
+            deposit state, and deposit lot size in satoshis.
+
+            --funding
+                Only resumes the funding flow and outputs the final deposit
+                state; if the deposit is not mid-funding, does not resume and
+                outputs an error.
+
+                --no-mint
+                    When resuming a funding flow, if the deposit is not already
+                    mid-minting, specifies not to mint TBTC once the deposit is
+                    qualified.
+
+            --redemption
+                Only resumes a flow if it is a redemption flow and outputs
+                the final deposit state; if the deposit is not mid-redemption,
+                does not resume and outputs an error.
+
+        redeem <bitcoin-address>
+            Initiates a deposit redemption flow that will redeem the deposit's
+            BTC to the specified Bitcoin address. When the flow completes,
+            outputs the deposit as a single tab-delimited line with the
+            deposit address, current deposit state, deposit lot size in
+            satoshis, and the transaction hash of the redemption Bitcoin
+            transaction.
+
+        courtesy-call
+            Attempts to notify the deposit it is undercollateralized and
+            should transition into courtesy call.
+
+        liquidate [--for <funding-timeout|undercollateralization|courtesy-timeout|redemption-timeout>]
+            Attempts to liquidate the deposit, reporting back the status of
+            the liquidation . By default, looks for any available reason to
+            liquidate. When the flow completes, outputs the deposit as a
+            single tab-delimited line with the deposit address, current
+            deposit state, deposit lot size in satoshis, and the liquidation
+            status (\`liquidated\`, \`in-auction\`, or \`failed\`).
+
+            --for <funding-timeout|undercollateralization|courtesy-timeout|redemption-timeout>
+                If specified, only triggers liquidation for the specified
+                reason. If the reason does not apply, reports \`not-applicable\`
+                status.
+
+        withdraw [--dry-run]
+            Attempts to withdraw the current account's allowance from a tBTC
+            deposit. Only the amount allowed for the current account is
+            withdrawn. Outputs the withdrawn amount in wei once withdrawal
+            is complete.
+
+            --dry-run
+                Outputs the amount that would be withdrawn in wei, but does
+                not broadcast the transaction to withdraw it.
+
+    lot-sizes
+        Returns a list of the currently available lot sizes, one per line.
+
+    supply
+        Returns the current supply as a decimal amount in TBTC. 18 decimals of
+        precision, but with a decimal point.
+
+    supply-cap
+        Returns the current supply cap as a decimal amount in TBTC.
     `)
 
   process.exit(1)
@@ -138,12 +230,15 @@ Unknown command ${args[0]} or bad parameters. Supported commands:
  * @return {Promise<string>}
  */
 async function runAction(action) {
-  web3.eth.defaultAccount = (await web3.eth.getAccounts())[0]
+  web3.eth.defaultAccount = account || (await web3.eth.getAccounts())[0]
+  const chainId = await web3.eth.getChainId()
+  // @ts-ignore TypeScript mad.
+  const config = AvailableConfigs[chainId.toString()]
 
   const tbtc = await TBTC.withConfig({
     web3: web3,
-    bitcoinNetwork: "testnet",
-    electrum: electrumConfigs.testnet
+    bitcoinNetwork: config.bitcoinNetwork,
+    electrum: config.electrum
   })
 
   return action(tbtc)
@@ -151,117 +246,12 @@ async function runAction(action) {
 
 runAction(/** @type {CommandAction} */ (action))
   .then(result => {
-    console.log("Action completed with final result:", result)
+    console.log(result)
 
     process.exit(0)
   })
   .catch(error => {
-    console.error("Action errored out with error:", error)
+    console.error("ERROR ", error)
 
     process.exit(1)
   })
-
-/**
- * @param {TBTCInstance} tbtc
- * @param {BN} satoshiLotSize
- * @param {boolean} mintOnActive
- * @return {Promise<string>}
- */
-async function createDeposit(tbtc, satoshiLotSize, mintOnActive) {
-  const deposit = await tbtc.Deposit.withSatoshiLotSize(satoshiLotSize)
-
-  return runDeposit(deposit, mintOnActive)
-}
-
-/**
- * @param {TBTCInstance} tbtc
- * @param {string} depositAddress
- * @param {boolean} mintOnActive
- * @return {Promise<string>}
- */
-async function resumeDeposit(tbtc, depositAddress, mintOnActive) {
-  const deposit = await tbtc.Deposit.withAddress(depositAddress)
-
-  return runDeposit(deposit, mintOnActive)
-}
-
-/**
- * @param {TBTCInstance} tbtc
- * @param {string} depositAddress
- * @param {string} redeemerAddress
- * @return {Promise<string>}
- */
-async function redeemDeposit(tbtc, depositAddress, redeemerAddress) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const deposit = await tbtc.Deposit.withAddress(depositAddress)
-      const redemption = await deposit.requestRedemption(redeemerAddress)
-      redemption.autoSubmit()
-
-      redemption.onWithdrawn(transactionID => {
-        console.log()
-
-        resolve(
-          `Redeemed deposit ${deposit.address} with Bitcoin transaction ` +
-            `${transactionID}.`
-        )
-      })
-    } catch (err) {
-      reject(err)
-    }
-  })
-}
-
-/**
- * @param {Deposit} deposit
- * @param {boolean} mintOnActive
- * @return {Promise<string>}
- */
-async function runDeposit(deposit, mintOnActive) {
-  deposit.autoSubmit()
-
-  return new Promise(async (resolve, reject) => {
-    deposit.onBitcoinAddressAvailable(async address => {
-      try {
-        const lotSize = await deposit.getLotSizeSatoshis()
-        console.log(
-          "\tGot deposit address:",
-          address,
-          "; fund with:",
-          lotSize.toString(),
-          "satoshis please."
-        )
-        console.log("Now monitoring for deposit transaction...")
-      } catch (err) {
-        reject(err)
-      }
-    })
-
-    deposit.onActive(async () => {
-      try {
-        if (mintOnActive) {
-          console.log("Deposit is active, minting...")
-          const tbtc = await deposit.mintTBTC()
-
-          resolve(tbtc.toString())
-        } else {
-          resolve("Deposit is active. Minting disabled by parameter.")
-        }
-      } catch (err) {
-        reject(err)
-      }
-    })
-  })
-}
-
-/**
- * @param {string} str
- * @return {BN?}
- */
-function bnOrNull(str) {
-  try {
-    return web3.utils.toBN(str)
-  } catch (_) {
-    return null
-  }
-}
